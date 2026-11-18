@@ -1,7 +1,7 @@
 # Диаграмма состояний карточки документа
 
-Источник истины — словарь `TRANSITIONS` в `app/services/workflow.py`. Диаграмма ниже сгенерирована из него,
-а тест `tests/unit/test_docs_consistency.py` проверяет, что она не разошлась с кодом (каждая стрелка и роль).
+Источник истины — функция `transition_roles` в `src/domain/workflow.rs`. Диаграмма ниже соответствует ей,
+а тест `tests/docs.rs::state_diagram_matches_transition_matrix` проверяет, что она не разошлась с кодом (каждая стрелка и роль).
 
 ```mermaid
 stateDiagram-v2

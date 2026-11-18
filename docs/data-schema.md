@@ -1,6 +1,6 @@
 # Схема данных
 
-СУБД — PostgreSQL 18. Схема создается миграцией Alembic `alembic/versions/0001_initial.py`, ORM-модели описаны в `app/models/entities.py`. Тест `tests/integration/test_docs_schema.py` сверяет ER-диаграмму ниже с ORM-моделями (набор таблиц и столбцов).
+СУБД — PostgreSQL 18. Схема создается SQL-миграцией `migrations/0001_initial.sql` (встроена в бинарный файл backend), строки таблиц описаны в `src/models.rs`. Тест `tests/docs.rs::er_diagram_matches_migrations` сверяет ER-диаграмму ниже с миграциями (набор таблиц и столбцов).
 
 ```mermaid
 erDiagram
@@ -124,11 +124,11 @@ erDiagram
 
 **resolutions.** Один документ может иметь несколько резолюций. Каждая резолюция относится к одному документу и одному исполнителю. Автор — только руководитель (проверяется RBAC), исполнитель — только активный пользователь с ролью `executor` (проверяется сервисом).
 
-**attachments.** Файл хранится в MinIO под ключом `documents/<document_id>/<uuid>.<ext>`. Исходное имя сохраняется только для отображения и в `Content-Disposition` при скачивании.
+**attachments.** Файл хранится в SeaweedFS (бакет `S3_BUCKET`) под ключом `documents/<document_id>/<uuid>.<ext>`. Исходное имя сохраняется только для отображения и в `Content-Disposition` при скачивании.
 
 **document_history.** Журнал действий по карточке. Запись создается в той же транзакции, что и само действие. Через API история доступна только для чтения. Коды действий: `document_registered`, `document_updated` (в `metadata.changes` — старое и новое значение каждого поля), `status_changed`, `document_annulled`, `resolution_created`, `resolution_updated`, `resolution_executed`, `file_attached`.
 
-**Удаление карточки** (только администратор) каскадно удаляет ее резолюции, вложения и историю (`ON DELETE CASCADE`), затем объекты удаляются из MinIO. Факт удаления фиксируется в журнале приложения (stdout).
+**Удаление карточки** (только администратор) каскадно удаляет ее резолюции, вложения и историю (`ON DELETE CASCADE`), затем объекты удаляются из SeaweedFS. Факт удаления фиксируется в журнале приложения (stdout).
 
 ## Индексы
 

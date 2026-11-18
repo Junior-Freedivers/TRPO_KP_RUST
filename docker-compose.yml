@@ -21,24 +21,35 @@ services:
       start_period: 10s
     stop_grace_period: 30s
 
-  minio:
-    image: minio/minio:latest
+  # Файловое хранилище вложений: SeaweedFS (master + volume + filer + S3-шлюз в одном процессе).
+  # Ключи доступа S3 берутся из .env и записываются в конфигурацию identities при старте контейнера.
+  seaweedfs:
+    image: chrislusf/seaweedfs:${SEAWEEDFS_VERSION:-latest}
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf '{"identities":[{"name":"backend","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","List","Tagging","Write"]}]}' \
+          "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json
+        exec weed server -dir=/data -ip=seaweedfs -ip.bind=0.0.0.0 \
+          -master.volumeSizeLimitMB=1024 -volume.max=0 \
+          -filer -s3 -s3.port=8333 -s3.config=/tmp/s3.json
     volumes:
-      - minio_data:/data
+      - seaweedfs_data:/data
     ports:
-      - "127.0.0.1:9000:9000"   # S3 API
-      - "127.0.0.1:9001:9001"   # веб-консоль MinIO
+      - "127.0.0.1:8333:8333"   # S3 API
+      - "127.0.0.1:8888:8888"   # веб-интерфейс filer (просмотр файлов)
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      # master готов + S3-шлюз принимает соединения
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/cluster/healthz && (wget -q -O /dev/null http://127.0.0.1:8333/healthz || nc -z 127.0.0.1 8333)"]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 10s
+      retries: 20
+      start_period: 15s
+    stop_grace_period: 30s
 
   backend:
     build:
@@ -49,17 +60,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      test: ["CMD", "correspondence", "healthcheck"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 40s
+      start_period: 20s
     stop_grace_period: 30s
 
   # --- по запросу: docker compose --profile test run --rm tests ---
@@ -72,19 +82,25 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
 
-  # --- по запросу: клиент MinIO для резервного копирования файлов (scripts/backup_storage.sh) ---
-  mc:
-    image: minio/mc:latest
+  # --- по запросу: rclone для резервного копирования файлов (scripts/backup_storage.sh) ---
+  rclone:
+    image: rclone/rclone:${RCLONE_VERSION:-latest}
     profiles: ["tools"]
+    environment:
+      RCLONE_CONFIG_SRC_TYPE: s3
+      RCLONE_CONFIG_SRC_PROVIDER: SeaweedFS
+      RCLONE_CONFIG_SRC_ENDPOINT: http://seaweedfs:8333
+      RCLONE_CONFIG_SRC_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
     volumes:
       - ./backups:/backups:z   # :z — метка SELinux (AlmaLinux)
     depends_on:
-      minio:
+      seaweedfs:
         condition: service_healthy
 
 volumes:
   postgres_data:
-  minio_data:
+  seaweedfs_data:

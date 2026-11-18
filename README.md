@@ -1,26 +1,28 @@
 # Информационная система учета входящей корреспонденции
 
-REST API для централизованного электронного учета входящих документов организации: регистрация с автоматическим номером, поиск и фильтрация, резолюции руководителя, назначение исполнителей, контроль сроков, вложения в S3-хранилище, журнал действий, архив, PDF-отчеты и CSV-выгрузка журнала регистрации. Права доступа проверяются на backend. Веб-интерфейс (HTML + Vanilla JS, без сборки) раздается тем же FastAPI по адресу **`/ui`** и работает только через REST API.
+REST API для централизованного электронного учета входящих документов организации: регистрация с автоматическим номером, поиск и фильтрация, резолюции руководителя, назначение исполнителей, контроль сроков, вложения в файловом хранилище SeaweedFS, журнал действий, архив, PDF-отчеты и CSV-выгрузка журнала регистрации. Права доступа проверяются на backend. Backend написан на **Rust**. Веб-интерфейс (HTML + Vanilla JS, без сборки) раздается тем же сервером по адресу **`/ui`** и работает только через REST API.
 
 ## Стек
 
 | Уровень | Технологии |
 |---|---|
-| Backend | Python 3.14, FastAPI, Pydantic v2 и Pydantic Settings, SQLAlchemy 2.x (async), asyncpg, Alembic |
-| Веб-интерфейс | HTML, CSS, Vanilla JS (ES-модули), Fetch API; без npm, сборщиков и фреймворков; раздается через `StaticFiles` |
-| Данные | PostgreSQL 18, MinIO (S3 API) через aioboto3 |
-| Безопасность | JWT (PyJWT), argon2 (argon2-cffi), RBAC на зависимостях FastAPI |
-| Отчеты | ReportLab (PDF, шрифт DejaVu Sans с кириллицей), CSV (UTF-8 BOM, `;`) |
-| Инфраструктура | Docker, Docker Compose, volumes, healthcheck, `restart: unless-stopped` |
-| Качество | pytest, pytest-asyncio, httpx, ruff |
+| Backend | Rust (edition 2024), axum 0.8, tokio, sqlx 0.8 (PostgreSQL, встроенные миграции), serde |
+| Веб-интерфейс | HTML, CSS, Vanilla JS (ES-модули), Fetch API; без npm, сборщиков и фреймворков; раздается через `tower-http::ServeDir` |
+| Данные | PostgreSQL 18; файлы — **SeaweedFS** (S3 API) через `aws-sdk-s3` |
+| Безопасность | JWT (`jsonwebtoken`), argon2id (`argon2`), RBAC на экстракторах axum |
+| Отчеты | `genpdf` (PDF, шрифт DejaVu Sans с кириллицей), CSV (UTF-8 BOM, `;`) |
+| Документация API | OpenAPI 3 (`utoipa`), Swagger UI на `/docs` |
+| Инфраструктура | Docker (многоэтапная сборка), Docker Compose, volumes, healthcheck, `restart: unless-stopped` |
+| Качество | `cargo test` (unit, HTTP, интеграционные с PostgreSQL и SeaweedFS), `cargo clippy` |
 
 Документация: [архитектура](docs/architecture.md) · [варианты использования](docs/use-case.md) · [состояния](docs/state-diagram.md) · [схема данных](docs/data-schema.md) · [тест-кейсы](docs/test-cases.md) · [допущения](docs/assumptions.md).
 
 ## Требования к окружению
 
 - Docker Engine 24+ и плагин Docker Compose v2 (`docker compose version`);
-- свободные порты 8000 (API), а также 5432, 9000, 9001 на `127.0.0.1`;
-- 2 ГБ RAM, 2 ГБ диска.
+- на Windows — Docker Desktop с включенной виртуализацией (WSL 2 / «Платформа виртуальной машины»);
+- свободные порты 8000 (API), а также 5432, 8333, 8888 на `127.0.0.1`;
+- 2 ГБ RAM, 3 ГБ диска (сборка Rust-образа).
 
 **AlmaLinux 10:**
 
@@ -38,34 +40,43 @@ SELinux можно оставить в режиме enforcing: bind-mount кат
 
 ```bash
 cp .env.example .env
-# обязательно замените пароли и JWT_SECRET, например:
-python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+# обязательно замените пароли, ключи хранилища и JWT_SECRET, например:
+openssl rand -base64 48
 
 docker compose up -d --build
-docker compose ps                          # backend, postgres, minio — healthy
+docker compose ps                          # backend, postgres, seaweedfs — healthy
 curl http://localhost:8000/health          # {"status":"ok","database":"ok","storage":"ok"}
 ```
 
-- Веб-интерфейс: **http://localhost:8000/ui** (адрес `http://localhost:8000/` перенаправляет туда же). Вход — учетными записями из seed (см. ниже).
-- Swagger UI: **http://localhost:8000/docs**. Вход: `POST /api/v1/auth/login` → скопировать `access_token` → кнопка **Authorize**.
-- Health-check: **http://localhost:8000/health** (также `/api/v1/health`).
-- Консоль MinIO: http://127.0.0.1:9001 (логин и пароль — `S3_ACCESS_KEY` / `S3_SECRET_KEY`).
+Первая сборка образа backend компилирует зависимости Rust и занимает несколько минут; последующие сборки используют кэш слоя зависимостей.
 
-Данные хранятся в именованных томах `postgres_data` и `minio_data` и переживают `docker compose restart`, `docker compose down` (без `-v`) и перезагрузку хоста. Backend корректно завершает работу по SIGTERM (`docker compose stop`).
+- Веб-интерфейс: **http://localhost:8000/ui** (адрес `http://localhost:8000/` перенаправляет туда же). Вход — учетными записями из seed (см. ниже).
+- Swagger UI: **http://localhost:8000/docs**, схема OpenAPI — `/openapi.json`. Вход: `POST /api/v1/auth/login` → скопировать `access_token` → кнопка **Authorize**.
+- Health-check: **http://localhost:8000/health** (также `/api/v1/health`).
+- Веб-интерфейс filer SeaweedFS (просмотр файлов хранилища): http://127.0.0.1:8888.
+
+Данные хранятся в именованных томах `postgres_data` и `seaweedfs_data` и переживают `docker compose restart`, `docker compose down` (без `-v`) и перезагрузку хоста. Backend корректно завершает работу по SIGTERM (`docker compose stop`): новые соединения не принимаются, текущие запросы дорабатывают.
+
+## Файловое хранилище SeaweedFS
+
+Вложения хранятся в [SeaweedFS](https://github.com/seaweedfs/seaweedfs) — распределенном хранилище объектов (Apache 2.0). Контейнер `seaweedfs` запускает в одном процессе master, volume-сервер, filer и S3-шлюз (`weed server -s3`). Backend обращается к нему по S3 API (порт 8333) с ключами `S3_ACCESS_KEY` / `S3_SECRET_KEY`: при старте контейнера они записываются в конфигурацию identities SeaweedFS. Бакет `S3_BUCKET` backend создает сам при запуске.
+
+Ключ объекта генерирует сервер: `documents/<id документа>/<uuid>.<ext>`; исходное имя файла хранится только в БД. Хранилище наружу не публикуется (порты привязаны к `127.0.0.1`), файлы отдаются только через `GET /api/v1/files/{id}/download` после проверки прав.
 
 ## Миграции
 
-Миграции применяются автоматически при каждом старте backend. Ручной запуск:
+Миграции (`migrations/*.sql`) встраиваются в бинарный файл и применяются автоматически при каждом старте backend. Ручной запуск:
 
 ```bash
-docker compose exec backend alembic upgrade head
-docker compose exec backend alembic current
+docker compose exec backend correspondence migrate
 ```
+
+Миграция идемпотентна: база, созданная прежней Python-версией (Alembic), подхватывается без пересоздания.
 
 ## Seed-данные
 
 ```bash
-docker compose exec backend python -m scripts.seed
+docker compose exec backend correspondence seed
 ```
 
 Seed создает 3 подразделения, 5 должностей, 8 типов документов, 10 корреспондентов, 5 пользователей и 20 документов во всех статусах: с резолюциями, историей, просроченными и близкими к сроку. Повторный запуск ничего не дублирует. Все персональные данные вымышлены.
@@ -82,7 +93,7 @@ Seed создает 3 подразделения, 5 должностей, 8 ти
 
 ## Веб-интерфейс
 
-Открывается по адресу **http://localhost:8000/ui** после `docker compose up -d` и загрузки seed-данных. Отдельный контейнер, Node.js и сборка не нужны: каталог `ui/` копируется в образ backend вместе с кодом, и FastAPI раздает его как статику (`app/main.py`, `app.mount("/ui", StaticFiles(...))`). Swagger остается на `/docs`.
+Открывается по адресу **http://localhost:8000/ui** после `docker compose up -d` и загрузки seed-данных. Отдельный контейнер, Node.js и сборка не нужны: каталог `ui/` копируется в образ backend, и сервер раздает его как статику (`src/api/mod.rs`, `nest_service("/ui", ServeDir::new(...))`). Swagger остается на `/docs`. REST API не изменился, поэтому интерфейс работает с Rust-версией без правок.
 
 ```
 ui/
@@ -126,7 +137,7 @@ ui/
 
 ## Матрица ролей и разрешений
 
-Единственный источник истины — `app/security/permissions.py`.
+Единственный источник истины — `src/security.rs` (`role_permissions`).
 
 | Разрешение | Делопроизводитель | Руководитель | Исполнитель | Администратор |
 |---|:-:|:-:|:-:|:-:|
@@ -150,7 +161,7 @@ ui/
 ² Администратор видит карточки только для того, чтобы проверить документ перед удалением или аннулированием; поиск ему недоступен ([допущение A-2](docs/assumptions.md)).
 ³ «На рассмотрении → на исполнении» выполняется автоматически при создании резолюции.
 
-Коды ответов: 401 — нет или недействительный токен; 403 — роль или контекст не позволяет действие (или пользователь деактивирован); 404 — объект не найден; 409 — недопустимый переход статуса, дубликат, архив; 413 — файл больше лимита; 422 — ошибка валидации. Формат ошибки единый:
+Коды ответов: 401 — нет или недействительный токен; 403 — роль или контекст не позволяет действие (или пользователь деактивирован); 404 — объект не найден; 405 — метод не поддерживается (например, изменение истории); 409 — недопустимый переход статуса, дубликат, архив; 413 — файл больше лимита; 422 — ошибка валидации. Права проверяются до разбора тела запроса, поэтому 401/403 имеют приоритет над 422. Формат ошибки единый:
 
 ```json
 {"detail": "Переход «зарегистрирован» → «исполнен» недопустим", "code": "INVALID_STATUS_TRANSITION", "field": "status"}
@@ -178,10 +189,10 @@ ui/
 | `POST /incoming/{id}/resolutions` · `GET /incoming/{id}/resolutions` | Резолюции | manager / просмотр |
 | `PATCH /resolutions/{id}` | Редактирование резолюции | manager |
 | `POST /incoming/{id}/files` | Файл PDF/JPG/PNG/DOCX, multipart (`file`, `attachment_type`) | clerk, executor |
-| `GET /files/{id}/download` | Скачивание (потоком, после RBAC) | все (с учетом прав) |
+| `GET /files/{id}/download` | Скачивание (потоком из SeaweedFS, после RBAC) | все (с учетом прав) |
 | `POST /reports/generate` | PDF: `documents`, `executors`, `deadlines` | clerk, manager |
 | `GET /exports/registration-log` | CSV журнала регистрации | clerk |
-| `GET /health` | БД, S3, сервис | без авторизации |
+| `GET /health` | БД, файловое хранилище, сервис | без авторизации |
 
 Параметры `GET /incoming`: `page`, `page_size` (≤ 100), `sort` (например, `-registration_date,registration_number`), `registration_number`, `date_from`, `date_to` (по дате регистрации), `correspondent_id`, `executor_id`, `status`, `document_type_id`, `search` (ключевые слова), `deadline_state` (`overdue` | `warning`).
 
@@ -190,16 +201,17 @@ ui/
 ```bash
 API=http://localhost:8000/api/v1
 tok() { curl -s -X POST $API/auth/login -H 'Content-Type: application/json' \
-          -d "{\"login\":\"$1\",\"password\":\"$2\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])'; }
+          -d "{\"login\":\"$1\",\"password\":\"$2\"}" | jq -r .access_token; }
 CLERK=$(tok clerk clerk123); MANAGER=$(tok manager manager123)
 
-CORR=$(curl -s $API/correspondents -H "Authorization: Bearer $CLERK" | python3 -c 'import sys,json;print(json.load(sys.stdin)["items"][0]["id"])')
-TYPE=$(curl -s $API/document-types -H "Authorization: Bearer $CLERK" | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])')
+CORR=$(curl -s $API/correspondents -H "Authorization: Bearer $CLERK" | jq -r '.items[0].id')
+TYPE=$(curl -s $API/document-types -H "Authorization: Bearer $CLERK" | jq -r '.[0].id')
 
-curl -s -X POST $API/incoming -H "Authorization: Bearer $CLERK" -H 'Content-Type: application/json' -d "{
+DOC=$(curl -s -X POST $API/incoming -H "Authorization: Bearer $CLERK" -H 'Content-Type: application/json' -d "{
   \"received_date\":\"$(date +%F)\", \"correspondent_id\":\"$CORR\", \"summary\":\"Запрос сведений\",
-  \"document_type_id\":\"$TYPE\", \"page_count\":2, \"execution_deadline\":\"$(date -d '+10 day' +%F)\"}"
+  \"document_type_id\":\"$TYPE\", \"page_count\":2, \"execution_deadline\":\"$(date -d '+10 day' +%F)\"}" | jq -r .id)
 
+curl -s -X POST $API/incoming/$DOC/files -H "Authorization: Bearer $CLERK" -F 'file=@scan.pdf;type=application/pdf'
 curl -s "$API/exports/registration-log" -H "Authorization: Bearer $CLERK" -o journal.csv
 curl -s -X POST $API/reports/generate -H "Authorization: Bearer $MANAGER" -H 'Content-Type: application/json' \
      -d "{\"report_type\":\"executors\",\"period_from\":\"$(date -d '-60 day' +%F)\",\"period_to\":\"$(date +%F)\"}" -o report.pdf
@@ -209,11 +221,13 @@ curl -s -X POST $API/reports/generate -H "Authorization: Bearer $MANAGER" -H 'Co
 
 ```bash
 scripts/backup_db.sh                                     # → backups/db/db_YYYYMMDD_HHMMSS.dump (pg_dump -Fc)
-scripts/backup_storage.sh                                # → backups/storage/storage_YYYYMMDD_HHMMSS/ (mc mirror)
+scripts/backup_storage.sh                                # → backups/storage/storage_YYYYMMDD_HHMMSS/ (rclone copy)
 
 scripts/restore_db.sh backups/db/db_20260930_120000.dump            # пересоздает БД, backend на время останавливается
 scripts/restore_storage.sh backups/storage/storage_20260930_120000
 ```
+
+Копирование файлов выполняет контейнер `rclone` (профиль `tools`) по S3 API SeaweedFS; ключи доступа передаются ему через переменные окружения, а не аргументы командной строки. Копия — обычный каталог с файлами по ключам `documents/<id>/…`, поэтому `restore_storage.sh` подходит и для переноса вложений из копии MinIO, сделанной прежней версией системы.
 
 **Проверка восстановления на чистой среде:**
 
@@ -232,40 +246,47 @@ scripts/restore_storage.sh backups/storage/<каталог>
 ## Тесты
 
 ```bash
-docker compose up -d --wait postgres minio
-docker compose --profile test run --rm tests                                  # все тесты
-docker compose --profile test run --rm tests python -m pytest tests/unit -q   # только unit
-docker compose --profile test run --rm tests ruff check .                      # линтер
+docker compose up -d --wait postgres seaweedfs
+docker compose --profile test run --rm tests                                   # все тесты, включая интеграционные
+docker compose --profile test run --rm tests cargo test --release --lib        # только unit
+docker compose --profile test run --rm tests cargo clippy --release --all-targets   # линтер
 ```
 
-Тест `tests/integration/test_ui_static.py` проверяет, что веб-интерфейс раздается по `/ui` с правильными MIME-типами, а `/` перенаправляет на него.
+| Набор | Файлы | Инфраструктура |
+|---|---|---|
+| Unit (33) | модули `src/**` (`#[cfg(test)]`): машина состояний, сроки, номер, статистика отчетов, права, JWT, argon2, проверка файлов, CSV, PDF | не нужна |
+| HTTP (6) | `tests/http.rs`: раздача `/ui`, Swagger и OpenAPI, 401/405/404/422 в едином формате, `/health` → 503 без зависимостей | не нужна |
+| Документация (2) | `tests/docs.rs`: диаграмма состояний = машина состояний, ER-диаграмма = миграции | не нужна |
+| Интеграционные (47) | `tests/api.rs`: REST API с настоящими PostgreSQL и SeaweedFS | `#[ignore]` по умолчанию, запускаются в контейнере `tests` |
 
-Интеграционные тесты сами создают отдельную БД `<POSTGRES_DB>_test` и бакет `correspondence-test`, прогоняют миграции вниз и вверх и очищают данные перед каждым тестом. Рабочие данные не затрагиваются. Описание кейсов и результаты — в [docs/test-cases.md](docs/test-cases.md).
+Интеграционные тесты сами создают отдельную БД `<POSTGRES_DB>_test` и бакет `correspondence-test` (переменная `TEST_S3_BUCKET`), применяют миграции и очищают данные перед каждым тестом; выполняются последовательно. Рабочие данные не затрагиваются. Описание кейсов — в [docs/test-cases.md](docs/test-cases.md).
 
-**Локальная разработка без контейнера backend** (Python 3.14):
+**Локальная разработка без контейнера backend** (Rust 1.88+):
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements-dev.txt
-docker compose up -d postgres minio
-# в .env заменить хосты postgres/minio на localhost
-alembic upgrade head && uvicorn app.main:app --reload
-pytest
+docker compose up -d postgres seaweedfs
+# в .env заменить хосты postgres/seaweedfs на localhost
+cargo run                                   # миграции + сервер на http://localhost:8000
+cargo run -- seed                           # демонстрационные данные
+cargo test                                  # unit, HTTP и проверки документации
+cargo test -- --include-ignored --test-threads=1   # плюс интеграционные
 ```
 
 ## Переменные окружения
 
 | Переменная | Назначение | По умолчанию |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://…` | — (обязательна) |
+| `DATABASE_URL` | `postgres://…` (формат `postgresql+asyncpg://…` прежней версии тоже принимается) | — (обязательна) |
 | `JWT_SECRET` | секрет подписи JWT (≥ 16 символов, рекомендуется ≥ 32) | — (обязательна) |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | срок жизни токена | 60 |
-| `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION` | MinIO / S3 | — / `us-east-1` |
+| `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION` | SeaweedFS (S3 API) | — / `us-east-1` |
 | `MAX_UPLOAD_SIZE_MB` | лимит размера файла | 20 |
 | `REG_NUMBER_TEMPLATE` | шаблон номера | `ВХ-{YYYY}-{NNNNNN}` |
 | `DEADLINE_WARNING_DAYS` | за сколько дней предупреждать о сроке | 3 |
 | `APP_TIMEZONE` | часовой пояс организации | `Europe/Moscow` |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | инициализация контейнера PostgreSQL | — |
 | `LOG_LEVEL`, `PDF_FONT_PATH` | уровень логов, путь к TTF для PDF | `INFO`, автопоиск DejaVu |
+| `BIND_ADDR`, `UI_DIR` | адрес HTTP-сервера, каталог веб-интерфейса | `0.0.0.0:8000`, `ui` |
+| `SEAWEEDFS_VERSION`, `RCLONE_VERSION` | теги образов в docker-compose.yml | `latest` |
 
 Секреты хранятся только в `.env`: файл исключен из git и из Docker-образа.

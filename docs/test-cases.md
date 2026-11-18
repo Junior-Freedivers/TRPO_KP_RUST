@@ -1,80 +1,83 @@
 # Тест-кейсы и результаты
 
-Всего **82 тестовые функции**:
-- **32 unit-функции** (66 случаев с учетом параметризации) проверяют чистую доменную логику;
-- **50 интеграционных функций** (52 случая) работают через REST API (httpx + ASGI) с настоящими PostgreSQL и MinIO; одна из них (`test_ui_static.py`) проверяет раздачу веб-интерфейса.
+Backend переписан на Rust; тесты перенесены вместе с ним (`cargo test`). Всего **88 тестовых функций**:
+- **33 unit-теста** в модулях `src/**` (`#[cfg(test)]`) проверяют чистую доменную логику;
+- **6 HTTP-тестов** (`tests/http.rs`) проверяют маршрутизацию, раздачу веб-интерфейса, Swagger/OpenAPI, единый формат ошибок 401/404/405/422 и `/health` без внешней инфраструктуры;
+- **2 теста документации** (`tests/docs.rs`) сверяют диаграмму состояний и ER-диаграмму с кодом и миграциями;
+- **47 интеграционных тестов** (`tests/api.rs`) работают через REST API (весь роутер axum в процессе, `tower::ServiceExt::oneshot`) с настоящими PostgreSQL и SeaweedFS. Они помечены `#[ignore]` и выполняются в контейнере `tests`.
 
-Запуск всех тестов:
+Запуск:
 
 ```bash
-docker compose --profile test run --rm tests            # все тесты
-docker compose --profile test run --rm tests python -m pytest tests/unit -q   # только unit
+docker compose --profile test run --rm tests                             # все тесты, включая интеграционные
+docker compose --profile test run --rm tests cargo test --release --lib  # только unit
+cargo test                                                               # локально: unit, HTTP, документация
 ```
 
 ## Соответствие обязательным сценариям (раздел 20 ТЗ)
 
 | № | Сценарий из ТЗ | Тест (файл::функция) | Ожидаемый результат |
 |---|---|---|---|
-| TC-01 | Успешный вход | `integration/test_auth.py::test_login_success_returns_token_and_role` | 200, JWT, роль `clerk`, нет `password_hash` |
-| TC-02 | Неверный пароль | `integration/test_auth.py::test_wrong_password_and_unknown_login_return_401` | 401 `INVALID_CREDENTIALS` (и для несуществующего логина) |
-| TC-03 | Деактивированный пользователь не входит | `integration/test_auth.py::test_deactivated_user_cannot_login_nor_use_old_token` | 403 `USER_INACTIVE` при входе и со старым токеном |
-| TC-04 | Создание пользователя администратором | `integration/test_users_and_dictionaries.py::test_admin_creates_user_without_exposing_password_hash` | 201, вход новым паролем, 409 на дубль логина/email |
-| TC-05 | Создание корреспондента | `integration/test_correspondents.py::test_clerk_creates_edits_and_finds_correspondent` | 201, редактирование, поиск |
-| TC-06 | Регистрация документа и получение номера | `integration/test_documents.py::test_register_document_assigns_number_date_and_history` | 201, `ВХ-<год>-000001`, затем `…000002`, дата регистрации, запись истории |
-| TC-07 | Отклонение `execution_deadline < registration_date` | `integration/test_documents.py::test_deadline_before_registration_is_rejected` | 422 `VALIDATION_ERROR`, `field = execution_deadline` |
-| TC-08 | Создание резолюции руководителем | `integration/test_resolutions_workflow.py::test_manager_creates_resolution_and_document_goes_to_execution` | 201, документ «на исполнении», история |
-| TC-09 | Просмотр поручения исполнителем | `integration/test_resolutions_workflow.py::test_executor_sees_only_own_assignments` | свои документы видны, чужие — 403 |
-| TC-10 | Прикрепление отчета | `integration/test_resolutions_workflow.py::test_executor_attaches_report_and_marks_execution` | 201, тип `execution_report` |
-| TC-11 | Отметка исполнения | там же + `test_document_executed_only_when_all_executors_done` | «исполнен», когда закрыты все резолюции; повтор — 409 |
-| TC-12 | Смена статуса и запись в историю | `integration/test_documents.py::test_status_change_is_written_to_history` | old/new status, автор, время, комментарий |
-| TC-13 | Поиск по номеру | `integration/test_search.py::test_search_by_registration_number` | частичный номер, точный эндпоинт, 404 |
-| TC-14 | Поиск по корреспонденту | `integration/test_search.py::test_search_by_correspondent_status_type_and_executor` | только документы корреспондента |
+| TC-01 | Успешный вход | `api.rs::login_success_returns_token_and_role` | 200, JWT, роль `clerk`, нет `password_hash` |
+| TC-02 | Неверный пароль | `api.rs::wrong_password_and_unknown_login_return_401` | 401 `INVALID_CREDENTIALS` (и для несуществующего логина) |
+| TC-03 | Деактивированный пользователь не входит | `api.rs::deactivated_user_cannot_login_nor_use_old_token` | 403 `USER_INACTIVE` при входе и со старым токеном |
+| TC-04 | Создание пользователя администратором | `api.rs::admin_creates_user_without_exposing_password_hash` | 201, вход новым паролем, 409 на дубль логина/email |
+| TC-05 | Создание корреспондента | `api.rs::clerk_creates_edits_and_finds_correspondent` | 201, редактирование, поиск |
+| TC-06 | Регистрация документа и получение номера | `api.rs::register_document_assigns_number_date_and_history` | 201, `ВХ-<год>-000001`, затем `…000002`, дата регистрации, запись истории |
+| TC-07 | Отклонение `execution_deadline < registration_date` | `api.rs::deadline_before_registration_is_rejected` | 422 `VALIDATION_ERROR`, `field = execution_deadline` |
+| TC-08 | Создание резолюции руководителем | `api.rs::manager_creates_resolution_and_document_goes_to_execution` | 201, документ «на исполнении», история |
+| TC-09 | Просмотр поручения исполнителем | `api.rs::executor_sees_only_own_assignments` | свои документы видны, чужие — 403 |
+| TC-10 | Прикрепление отчета | `api.rs::executor_attaches_report_and_marks_execution` | 201, тип `execution_report` |
+| TC-11 | Отметка исполнения | там же + `api.rs::document_executed_only_when_all_executors_done` | «исполнен», когда закрыты все резолюции; повтор — 409 |
+| TC-12 | Смена статуса и запись в историю | `api.rs::status_change_is_written_to_history` | old/new status, автор, время, комментарий |
+| TC-13 | Поиск по номеру | `api.rs::search_by_registration_number` | частичный номер, точный эндпоинт, 404 |
+| TC-14 | Поиск по корреспонденту | `api.rs::search_by_correspondent_status_type_and_executor` | только документы корреспондента |
 | TC-15 | Фильтр по статусу | там же | только «на исполнении» |
-| TC-16 | Фильтр по датам | `integration/test_search.py::test_filter_by_dates` | диапазоны; `date_from > date_to` — 422 |
-| TC-17 | CSV с кириллицей | `integration/test_reports_exports.py::test_csv_registration_log_with_cyrillic` | BOM, `;`, русские заголовки, данные = БД |
-| TC-18 | PDF-отчет | `integration/test_reports_exports.py::test_pdf_reports_are_generated[documents/executors/deadlines]` | 200 `application/pdf` для всех трех типов |
-| TC-19 | Запрет редактирования архивного документа | `integration/test_documents.py::test_archived_document_cannot_be_edited` | 409 `DOCUMENT_ARCHIVED` (редактирование и загрузка файла) |
-| TC-20 | Запрет удаления документа не-администратором | `integration/test_documents.py::test_only_admin_can_delete_document` | 403 для clerk/manager/executor, 204 для admin, каскад |
-| TC-21 | 403 при недопустимой роли | `…::test_non_admin_cannot_manage_users`, `…::test_correspondent_validation_and_rbac`, `…::test_only_clerk_registers_and_edits`, `…::test_csv_filters_and_rbac` и др. | 403 `FORBIDDEN` в едином формате ошибки |
-| TC-22 | Запрет скачивания файла без прав | `integration/test_files.py::test_download_forbidden_without_rights` | без токена 401, чужой исполнитель 403 |
+| TC-16 | Фильтр по датам | `api.rs::filter_by_dates` | диапазоны; `date_from > date_to` — 422 |
+| TC-17 | CSV с кириллицей | `api.rs::csv_registration_log_with_cyrillic` | BOM, `;`, русские заголовки, данные = БД |
+| TC-18 | PDF-отчет | `api.rs::pdf_reports_are_generated` (documents, executors, deadlines) | 200 `application/pdf` для всех трех типов |
+| TC-19 | Запрет редактирования архивного документа | `api.rs::archived_document_cannot_be_edited` | 409 `DOCUMENT_ARCHIVED` (редактирование и загрузка файла) |
+| TC-20 | Запрет удаления документа не-администратором | `api.rs::only_admin_can_delete_document` | 403 для clerk/manager/executor, 204 для admin, каскад |
+| TC-21 | 403 при недопустимой роли | `…::non_admin_cannot_manage_users`, `…::correspondent_validation_and_rbac`, `…::only_clerk_registers_and_edits`, `…::csv_filters_and_rbac` и др. | 403 `FORBIDDEN` в едином формате ошибки |
+| TC-22 | Запрет скачивания файла без прав | `api.rs::download_forbidden_without_rights` | без токена 401, чужой исполнитель 403 |
 
 ## Дополнительные проверки сверх обязательных
 
 | Область | Тест | Что проверяет |
 |---|---|---|
-| Гонки при регистрации | `test_documents.py::test_parallel_registration_produces_unique_numbers` | 12 параллельных регистраций: номера уникальны, без пропусков |
-| Целостность | `test_documents.py::test_registration_integrity_checks` | `page_count ≥ 1`, существующие корреспондент и тип, неактивный тип, дата поступления |
-| Недопустимый переход | `test_documents.py::test_invalid_transition_returns_409_and_role_check_returns_403` | 409 для несуществующего перехода, 403 для чужой роли, в историю не пишется |
-| История только для чтения | `test_documents.py::test_history_is_read_only` | POST/PUT/PATCH/DELETE — 405 |
-| Аннулирование | `test_documents.py::test_admin_annuls_document_back_to_registered` | из архива в «зарегистрирован», `archived_at` сброшен |
-| Роль из БД | `test_auth.py::test_role_is_always_loaded_from_db` | смена роли действует на уже выданный токен |
-| Резолюции | `test_resolutions_workflow.py::test_resolution_rules`, `::test_resolution_editable_until_completion` | состояние документа, только manager, только активный executor, блокировка после исполнения |
-| Полный цикл | `test_resolutions_workflow.py::test_full_lifecycle_to_archive` | все 6 статусов в истории по порядку |
-| Файлы | `test_files.py::test_clerk_uploads_scan_to_s3_and_downloads_it`, `::test_storage_key_is_server_generated`, `::test_invalid_uploads_are_rejected` | объект в MinIO, побайтное совпадение, ключ без исходного имени, path traversal, MIME/сигнатура/размер (413) |
-| Контроль сроков | `test_search.py::test_deadline_control_overdue_and_warning` | `overdue`/`warning`/`ok`, `days_left`, фильтр `deadline_state` |
-| Поиск | `test_search.py::test_keyword_search_…`, `::test_pagination_and_sorting` | регистронезависимый кириллический поиск, экранирование `%_`, пагинация, сортировка, 422 на недопустимое поле |
-| Отчеты | `test_reports_exports.py::test_pdf_report_with_filters_and_validation` | фильтры, обязательный период, 403 для executor/admin |
-| Seed | `test_seed.py::test_seed_creates_consistent_demo_data` | состав данных, все статусы, история соответствует статусам, идемпотентность, вход тестовыми учетками |
-| Инфраструктура | `test_health_openapi.py` | `/health` (БД+S3), Swagger, наличие всех эндпоинтов раздела 11 в OpenAPI |
-| Документация = код | `unit/test_docs_consistency.py`, `integration/test_docs_schema.py` | диаграмма состояний и ER-диаграмма совпадают с кодом |
-| Unit | `tests/unit/*` | номер по шаблону, переходы, сроки, RBAC-матрица, JWT, проверка файлов, CSV, показатели отчетов, PDF с кириллицей |
+| Гонки при регистрации | `api.rs::parallel_registration_produces_unique_numbers` | 12 параллельных регистраций: номера уникальны, без пропусков |
+| Целостность | `api.rs::registration_integrity_checks` | `page_count ≥ 1`, существующие корреспондент и тип, неактивный тип, дата поступления |
+| Недопустимый переход | `api.rs::invalid_transition_returns_409_and_role_check_returns_403` | 409 для несуществующего перехода, 403 для чужой роли, в историю не пишется |
+| История только для чтения | `api.rs::history_is_read_only` | POST/PUT/PATCH/DELETE — 405 |
+| Аннулирование | `api.rs::admin_annuls_document_back_to_registered` | из архива в «зарегистрирован», `archived_at` сброшен |
+| Роль из БД | `api.rs::role_is_always_loaded_from_db` | смена роли действует на уже выданный токен |
+| Резолюции | `api.rs::resolution_rules`, `::resolution_editable_until_completion` | состояние документа, только manager, только активный executor, блокировка после исполнения |
+| Полный цикл | `api.rs::full_lifecycle_to_archive` | все 6 статусов в истории по порядку |
+| Файлы | `api.rs::clerk_uploads_scan_to_storage_and_downloads_it`, `::storage_key_is_server_generated`, `::invalid_uploads_are_rejected` | объект в SeaweedFS, побайтное совпадение, ключ без исходного имени, path traversal, MIME/сигнатура/размер (413) |
+| Контроль сроков | `api.rs::deadline_control_overdue_and_warning` | `overdue`/`warning`/`ok`, `days_left`, фильтр `deadline_state` |
+| Поиск | `api.rs::keyword_search_…`, `::pagination_and_sorting` | регистронезависимый кириллический поиск, экранирование `%_`, пагинация, сортировка, 422 на недопустимое поле |
+| Отчеты | `api.rs::pdf_report_with_filters_and_validation` | фильтры, обязательный период, 403 для executor/admin |
+| Seed | `api.rs::seed_creates_consistent_demo_data` | состав данных, все статусы, история соответствует статусам, идемпотентность, вход тестовыми учетками |
+| Инфраструктура | `api.rs::health_checks_database_and_storage`, `http.rs::swagger_and_all_required_endpoints_are_published`, `http.rs::health_reports_unavailable_dependencies_with_503`, `http.rs::ui_is_served_and_root_redirects` | `/health` (БД + SeaweedFS, 503 при недоступности), Swagger, наличие всех эндпоинтов раздела 11 в OpenAPI, раздача `/ui` |
+| Документация = код | `docs.rs::state_diagram_matches_transition_matrix`, `docs.rs::er_diagram_matches_migrations` | диаграмма состояний и ER-диаграмма совпадают с кодом и миграциями |
+| Unit | модули `src/**` | номер по шаблону, переходы, сроки, RBAC-матрица, JWT, проверка файлов, CSV, показатели отчетов, PDF с кириллицей, формат Content-Disposition, разбор PATCH (`null` и отсутствие поля) |
 
 ## Результаты прогона
 
 | Набор | Где выполнен | Результат |
 |---|---|---|
-| Unit-тесты (`tests/unit`, 66 случаев) | среда разработки: Python 3.12, без доступа к сети, запуск через минимальный совместимый раннер | **66 / 66 пройдено** |
-| Интеграционные тесты (`tests/integration`, 52 случая) | требуют Docker (PostgreSQL + MinIO) | **не запускались в среде разработки** (нет Docker и сети для установки зависимостей). Запускаются командой `docker compose --profile test run --rm tests` |
+| Unit-тесты (33) | среда разработки: Windows 11, Rust 1.99, `cargo test` | **33 / 33 пройдено** |
+| HTTP-тесты (6) | там же, без PostgreSQL и SeaweedFS | **6 / 6 пройдено** |
+| Тесты документации (2) | там же | **2 / 2 пройдено** |
+| Интеграционные тесты (47) | требуют Docker (PostgreSQL + SeaweedFS) | **не запускались в среде разработки**: Docker Desktop установлен, но на машине не включена аппаратная виртуализация (WSL 2), движок Docker не стартует. Запускаются командой `docker compose --profile test run --rm tests` |
 
 Дополнительно в среде разработки проверено:
 
-- компиляция всех модулей;
-- статический анализ: нет неиспользуемых импортов, неопределенных имен и импортов несуществующих объектов между модулями;
-- сверка ER-диаграммы с миграцией и ORM-моделями (10 таблиц, столбцы совпадают);
-- мутационная проверка теста диаграммы состояний: искаженная диаграмма дает падение теста;
-- визуальная проверка PDF-отчета: кириллица отображается корректно.
+- сборка без ошибок и предупреждений компилятора; `cargo clippy --all-targets` без замечаний;
+- формирование PDF-отчета на 80 строк с кириллицей (5 страниц, шрифты встроены, потоки сжаты);
+- сверка ER-диаграммы с SQL-миграцией (10 таблиц, столбцы совпадают) и диаграммы состояний с машиной состояний.
 
-После прогона в Docker эту таблицу нужно дополнить фактическим выводом pytest.
+Docker-образ и docker-compose.yml по той же причине в среде разработки не собирались и не запускались. После прогона в Docker эту таблицу нужно дополнить фактическим выводом `cargo test`.
 
 ## Веб-интерфейс
 
@@ -106,4 +109,4 @@ docker compose --profile test run --rm tests python -m pytest tests/unit -q   # 
 
 **Как проверено.** В среде разработки нет Docker, поэтому интерфейс прогонялся в браузере Chromium (Playwright, окно 1280×860) против тестового эмулятора API. Эмулятор воспроизводит контракт backend: пути, схемы ответов, матрицу прав, переходы статусов и формат ошибок. В поставку он не входит. Результат: **83 проверки по сценариям UI-01…UI-21 пройдены**, исключений JavaScript нет. В консоли браузера были только сетевые записи об ответах 401/403/404/409/422, которые сценарии вызывали намеренно. Таблицы на 1280 и 1000 пикселях не требуют горизонтальной прокрутки.
 
-Против настоящего backend (PostgreSQL + MinIO) интерфейс в среде разработки **не запускался**; `test_ui_static.py` тоже не запускался. После `docker compose up -d` и seed сценарии UI-01…UI-21 нужно пройти вручную по адресу http://localhost:8000/ui.
+Против настоящего Rust-backend (PostgreSQL + SeaweedFS) интерфейс в среде разработки **не запускался**; раздача `/ui` проверена тестом `http.rs::ui_is_served_and_root_redirects`. После `docker compose up -d` и seed сценарии UI-01…UI-21 нужно пройти вручную по адресу http://localhost:8000/ui.

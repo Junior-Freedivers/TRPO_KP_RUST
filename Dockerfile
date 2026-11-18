@@ -1,46 +1,53 @@
 # syntax=docker/dockerfile:1
 
-# --- стадия сборки: wheel-пакеты (если для Python 3.14 нет готовой сборки — компилируются здесь) ---
-FROM python:3.14-slim AS builder
+# --- стадия сборки --------------------------------------------------------------------------------
+FROM rust:1-slim-trixie AS builder
+# cmake/perl — сборка aws-lc-sys (TLS для клиента S3); fonts-dejavu-core — шрифт для PDF в тестах
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
+    && apt-get install -y --no-install-recommends cmake perl pkg-config fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY requirements.txt requirements-dev.txt ./
-RUN pip wheel --wheel-dir /wheels -r requirements-dev.txt
+
+# 1) зависимости собираются отдельным слоем: он пересобирается только при изменении Cargo.toml/Cargo.lock
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && touch src/lib.rs \
+    && cargo build --release --locked \
+    && rm -rf src
+
+# 2) исходный код приложения (миграции встраиваются в бинарный файл на этапе компиляции)
+COPY src src
+COPY migrations migrations
+RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
 
-# --- рабочий образ ---
-FROM python:3.14-slim AS runtime
+# --- рабочий образ --------------------------------------------------------------------------------
+FROM debian:trixie-slim AS runtime
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-# fonts-dejavu-core — шрифт с кириллицей для PDF-отчетов
+# fonts-dejavu-core — шрифт с кириллицей для PDF-отчетов; ca-certificates — для S3 по HTTPS
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
-RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
-    pip install --no-index --find-links=/wheels -r requirements.txt
+COPY --from=builder /build/target/release/correspondence /usr/local/bin/correspondence
+COPY ui ./ui
+ENV UI_DIR=/app/ui \
+    BIND_ADDR=0.0.0.0:8000
 
-COPY . .
-RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
+RUN useradd --create-home --uid 10001 appuser
 USER appuser
 
 EXPOSE 8000
-# миграции -> uvicorn через exec: SIGTERM получает uvicorn (graceful shutdown)
-ENTRYPOINT ["sh", "scripts/entrypoint.sh"]
+# при старте: миграции -> подготовка бакета -> HTTP-сервер; SIGTERM — штатное завершение (graceful shutdown)
+ENTRYPOINT ["correspondence"]
+CMD ["serve"]
 
 
-# --- образ для тестов: docker compose --profile test run --rm tests ---
-FROM runtime AS dev
-USER root
-RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
-    pip install --no-index --find-links=/wheels -r requirements-dev.txt
-USER appuser
-ENTRYPOINT []
-CMD ["sh", "-c", "python -m pytest"]
+# --- образ для тестов: docker compose --profile test run --rm tests -------------------------------
+FROM builder AS dev
+COPY tests tests
+COPY docs docs
+COPY ui ui
+ENV UI_DIR=/build/ui
+# unit-тесты + интеграционные (реальные PostgreSQL и SeaweedFS); интеграционные выполняются последовательно
+CMD ["cargo", "test", "--release", "--locked", "--", "--include-ignored", "--test-threads=1"]

@@ -1,0 +1,60 @@
+[package]
+name = "correspondence"
+version = "2.0.0"
+edition = "2024"
+description = "Информационная система для учета входящей корреспонденции организации (backend на Rust)"
+publish = false
+
+[[bin]]
+name = "correspondence"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest"] }
+axum = { version = "0.8", features = ["multipart", "macros"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+dotenvy = "0.15"
+form_urlencoded = "1"
+genpdf = "0.2"
+jsonwebtoken = "9"
+# та же версия, что использует printpdf: сжатие потоков готового PDF
+lopdf = "0.26"
+percent-encoding = "2"
+# та же версия, что использует genpdf (нужен тип BuiltinFont)
+printpdf = { version = "0.3", default-features = false }
+rand = "0.8"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+serde_urlencoded = "0.7"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "macros"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+futures = "0.3"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+# argon2 (m = 64 МиБ) в отладочной сборке слишком медленный — оптимизируем его и в dev/test
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
